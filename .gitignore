@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# Local trained model artifacts are too large for Git.
+models/
+
+# Local processed datasets are too large for Git.
+data/
