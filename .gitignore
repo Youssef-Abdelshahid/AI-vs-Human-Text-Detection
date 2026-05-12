@@ -1,8 +1,14 @@
 __pycache__/
 *.py[cod]
+.ipynb_checkpoints/
 
 # Local trained model artifacts are too large for Git.
 models/
 
 # Local processed datasets are too large for Git.
 data/
+
+# Local cache files are too large for Git.
+cache/
+
+!cache/.gitkeep
