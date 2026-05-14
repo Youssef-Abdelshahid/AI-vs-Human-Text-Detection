@@ -4,309 +4,39 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI-Generated Text Detection</title>
-  <style>
-    :root {
-      --bg: #f5f7fb;
-      --panel: #ffffff;
-      --text: #172033;
-      --muted: #657083;
-      --line: #d9e0ea;
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --warning: #facc15;
-      --warning-soft: #fef9c3;
-      --success-soft: #e8f7ef;
-      --danger-soft: #fff1f2;
-      --shadow: 0 18px 48px rgba(23, 32, 51, 0.1);
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-family: Arial, Helvetica, sans-serif;
-      line-height: 1.5;
-    }
-
-    .page {
-      width: min(1120px, calc(100% - 32px));
-      margin: 0 auto;
-      padding: 36px 0;
-    }
-
-    header {
-      margin-bottom: 24px;
-    }
-
-    h1 {
-      margin: 0 0 8px;
-      font-size: 32px;
-      font-weight: 800;
-      letter-spacing: 0;
-    }
-
-    .description {
-      max-width: 760px;
-      margin: 0;
-      color: var(--muted);
-      font-size: 16px;
-    }
-
-    .workspace {
-      display: grid;
-      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
-      gap: 20px;
-      align-items: start;
-    }
-
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-      padding: 22px;
-    }
-
-    .controls {
-      display: flex;
-      gap: 12px;
-      align-items: end;
-      margin-bottom: 16px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 7px;
-      color: var(--muted);
-      font-size: 14px;
-      font-weight: 700;
-    }
-
-    textarea,
-    button {
-      font: inherit;
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 330px;
-      resize: vertical;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-      color: var(--text);
-      background: #fff;
-      outline: none;
-    }
-
-    textarea:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
-    }
-
-    button {
-      min-height: 44px;
-      border: 0;
-      border-radius: 8px;
-      background: var(--primary);
-      color: #fff;
-      padding: 0 18px;
-      font-weight: 800;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background: var(--primary-dark);
-    }
-
-    button:disabled {
-      cursor: wait;
-      opacity: 0.72;
-    }
-
-    .helper {
-      min-height: 24px;
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    .error {
-      display: none;
-      margin-top: 14px;
-      padding: 12px 14px;
-      border-radius: 8px;
-      background: var(--danger-soft);
-      color: #9f1239;
-      font-weight: 700;
-    }
-
-    .result-header {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: center;
-      margin-bottom: 18px;
-    }
-
-    .result-title {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 800;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 32px;
-      border-radius: 999px;
-      background: #eef4ff;
-      color: #1e40af;
-      padding: 0 12px;
-      font-size: 13px;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-
-    .meter {
-      margin: 12px 0 18px;
-    }
-
-    .metric-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin: 12px 0 18px;
-    }
-
-    .percentage {
-      font-size: 48px;
-      font-weight: 900;
-      line-height: 1;
-    }
-
-    .meter-track {
-      height: 12px;
-      margin-top: 12px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: #e9eef6;
-    }
-
-    .meter-fill {
-      width: 0%;
-      height: 100%;
-      border-radius: inherit;
-      background: linear-gradient(90deg, #22c55e, #f59e0b, #ef4444);
-      transition: width 200ms ease;
-    }
-
-    .section-title {
-      margin: 22px 0 10px;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .note {
-      display: none;
-      margin: 14px 0 0;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    .highlighted-text {
-      min-height: 110px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcff;
-      padding: 14px;
-      white-space: pre-wrap;
-    }
-
-    .ai-highlight {
-      border-radius: 4px;
-      background: var(--warning-soft);
-      box-shadow: inset 0 -0.18em 0 var(--warning);
-      padding: 1px 3px;
-    }
-
-    .segments {
-      display: grid;
-      gap: 10px;
-      max-height: 360px;
-      overflow: auto;
-      padding-right: 4px;
-    }
-
-    .segment {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      background: #fff;
-    }
-
-    .segment.ai {
-      border-color: #facc15;
-      background: #fffbeb;
-    }
-
-    .segment-meta {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 800;
-      margin-bottom: 6px;
-    }
-
-    .empty-state {
-      color: var(--muted);
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      padding: 18px;
-      background: #fbfcff;
-    }
-
-    @media (max-width: 880px) {
-      .workspace {
-        grid-template-columns: 1fr;
-      }
-
-      .controls {
-        align-items: stretch;
-        flex-direction: column;
-      }
-
-      button {
-        width: 100%;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('styles_asset', filename='styles.css') }}">
 </head>
 <body>
   <main class="page">
     <header>
       <h1>AI-Generated Text Detection</h1>
-      <p class="description">Test the trained English detector with section-level highlighting and an overall AI usage estimate.</p>
+      <p class="description">Test trained AI detectors with sentence-level highlighting and an overall AI usage estimate.</p>
     </header>
 
     <section class="workspace">
       <form class="panel" id="analysisForm">
+        <div class="model-grid">
+          <div>
+            <label for="essayModelSelect">Overall essay model</label>
+            <select id="essayModelSelect" disabled>
+              <option value="">Loading essay models...</option>
+            </select>
+          </div>
+          <div>
+            <label for="sentenceModelSelect">Highlighting sentence model</label>
+            <select id="sentenceModelSelect" disabled>
+              <option value="">Loading sentence models...</option>
+            </select>
+          </div>
+        </div>
+
         <div class="controls">
-          <button id="analyzeButton" type="submit">Analyze</button>
+          <button id="analyzeButton" type="submit" disabled>Analyze</button>
         </div>
 
         <label for="inputText">Text</label>
-        <textarea id="inputText" placeholder="Paste English text to analyze. The app will group nearby sentences into sections and highlight AI-detected sections."></textarea>
-        <div class="helper" id="helperText">English sentence mode analyzes paragraph and nearby-sentence chunks.</div>
+        <textarea id="inputText"></textarea>
+        <div class="helper" id="helperText"></div>
         <div class="error" id="errorBox"></div>
       </form>
 
@@ -316,162 +46,34 @@
           <span class="badge" id="modelBadge">essay + sentence models</span>
         </div>
 
-        <div id="emptyState" class="empty-state">Paste text and run analysis to see the AI percentage, highlighted sections, and section-by-section predictions.</div>
+        <div id="emptyState" class="empty-state">Paste text and run analysis to see the AI percentage, highlighted sentences, and sentence-by-sentence predictions.</div>
 
         <div id="resultContent" hidden>
           <div class="meter">
+            <div class="section-title">Overall AI percentage</div>
             <div class="percentage"><span id="aiPercentage">0</span>%</div>
+            <p class="note" id="essayModelNote"></p>
             <div class="meter-track"><div class="meter-fill" id="meterFill"></div></div>
           </div>
+
           <div class="metric-row">
             <div class="badge" id="overallLabel">Mostly Human</div>
             <div class="badge" id="humanPercentageBadge" hidden>Human 0%</div>
           </div>
+
           <p class="note" id="analysisNote"></p>
 
-          <div class="section-title">Most AI-Like Sections</div>
+          <div class="section-title">Highlighted sentences</div>
+          <p class="note" id="sentenceModelNote"></p>
           <div class="highlighted-text" id="highlightedText"></div>
 
-          <div class="section-title" id="breakdownTitle">Chunk Breakdown</div>
+          <div class="section-title" id="breakdownTitle">Sentence Breakdown</div>
           <div class="segments" id="segments"></div>
         </div>
       </aside>
     </section>
   </main>
 
-  <script>
-    const form = document.getElementById('analysisForm');
-    const inputText = document.getElementById('inputText');
-    const helperText = document.getElementById('helperText');
-    const analyzeButton = document.getElementById('analyzeButton');
-    const errorBox = document.getElementById('errorBox');
-    const emptyState = document.getElementById('emptyState');
-    const resultContent = document.getElementById('resultContent');
-    const aiPercentage = document.getElementById('aiPercentage');
-    const meterFill = document.getElementById('meterFill');
-    const overallLabel = document.getElementById('overallLabel');
-    const humanPercentageBadge = document.getElementById('humanPercentageBadge');
-    const analysisNote = document.getElementById('analysisNote');
-    const breakdownTitle = document.getElementById('breakdownTitle');
-    const highlightedText = document.getElementById('highlightedText');
-    const segments = document.getElementById('segments');
-    const modelBadge = document.getElementById('modelBadge');
-
-    inputText.placeholder = 'Paste English text to analyze. The essay model gives the overall AI score; the sentence model highlights the most AI-like local sections.';
-    helperText.textContent = 'Overall percentage comes from the essay model. Highlighting is guided by local sentence-model ranking.';
-    modelBadge.textContent = 'essay + sentence models';
-
-    function showError(message) {
-      errorBox.textContent = message;
-      errorBox.style.display = 'block';
-    }
-
-    function clearError() {
-      errorBox.textContent = '';
-      errorBox.style.display = 'none';
-    }
-
-    async function readJsonResponse(response) {
-      const text = await response.text();
-      if (!text) {
-        return {};
-      }
-
-      try {
-        return JSON.parse(text);
-      } catch (error) {
-        throw new Error('The server returned an invalid response. Check the Flask terminal for details.');
-      }
-    }
-
-    function renderSegments(items, unitLabel = 'Section') {
-      segments.innerHTML = '';
-      items.forEach((item) => {
-        const segment = document.createElement('article');
-        segment.className = `segment ${item.selected ? 'ai' : 'human'}`;
-
-        const meta = document.createElement('div');
-        meta.className = 'segment-meta';
-
-        const label = document.createElement('span');
-        const selectedText = item.selected ? 'Highlighted' : 'Not highlighted';
-        label.textContent = `${unitLabel} #${item.index} ${selectedText}`;
-
-        const confidence = document.createElement('span');
-        confidence.textContent = item.ai_confidence === null ? '' : `Local AI-likeness ${item.ai_confidence}%`;
-
-        const text = document.createElement('div');
-        text.textContent = item.text;
-
-        meta.append(label, confidence);
-        segment.append(meta, text);
-        segments.appendChild(segment);
-      });
-    }
-
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      clearError();
-
-      const text = inputText.value.trim();
-      if (!text) {
-        showError('Please paste some text to analyze.');
-        return;
-      }
-
-      analyzeButton.disabled = true;
-      analyzeButton.textContent = 'Analyzing...';
-      const controller = new AbortController();
-      const timeoutMs = 120000;
-      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-      try {
-        const response = await fetch('/predict', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, model_key: 'en_combined' }),
-          signal: controller.signal
-        });
-        const data = await readJsonResponse(response);
-        if (!response.ok) {
-          throw new Error(data.error || 'Analysis failed.');
-        }
-
-        emptyState.hidden = true;
-        resultContent.hidden = false;
-        aiPercentage.textContent = data.ai_percentage;
-        meterFill.style.width = `${Math.max(0, Math.min(100, data.ai_percentage))}%`;
-        overallLabel.textContent = data.overall_label;
-        if (data.human_percentage === null || data.human_percentage === undefined) {
-          humanPercentageBadge.hidden = true;
-        } else {
-          humanPercentageBadge.hidden = false;
-          humanPercentageBadge.textContent = `Human ${data.human_percentage}%`;
-        }
-        analysisNote.textContent = data.analysis_note || '';
-        analysisNote.style.display = data.analysis_note ? 'block' : 'none';
-        breakdownTitle.textContent = data.breakdown_label || 'Chunk Breakdown';
-        highlightedText.innerHTML = data.highlighted_text;
-        modelBadge.textContent = data.model_file;
-        const unitLabel = (data.breakdown_label || '').startsWith('Paragraph')
-          ? 'Paragraph'
-          : (data.breakdown_label || '').startsWith('Document') ? 'Document' : 'Section';
-        renderSegments(data.segments, unitLabel);
-      } catch (error) {
-        if (error.name === 'AbortError') {
-          showError('Analysis is taking too long. The model may still be downloading or loading in Flask; check the terminal and try again after it finishes.');
-        } else if (error instanceof TypeError) {
-          showError('Could not reach the Flask server. Check the terminal to see whether the app crashed, restarted, or is still loading the pretrained model.');
-        } else {
-          showError(error.message);
-        }
-      } finally {
-        window.clearTimeout(timeout);
-        analyzeButton.disabled = false;
-        analyzeButton.textContent = 'Analyze';
-      }
-    });
-
-  </script>
+  <script src="{{ url_for('scripts_asset', filename='main.js') }}" defer></script>
 </body>
 </html>

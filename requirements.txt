@@ -3,3 +3,7 @@ joblib
 nltk
 scikit-learn
 pandas
+xgboost
+torch
+tensorflow
+transformers

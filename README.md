@@ -16,8 +16,9 @@ Project Research.pdf
 
 Authors:
 
-Adham Mohamed  
-Ammar Alaa  
+Adham Mohamed Abdelaziz
+Ahmed Mohamed Ghazouly
+Ammar Alaa Mostafa
 Youssef Mohamed Abdelshahid  
 Youssef Mohamed Amer  
 
@@ -113,12 +114,19 @@ Each notebook includes:
 A Flask web application is provided to test trained English models.
 
 Front-end/app.py
+Front-end/index.html
+Front-end/styles/styles.css
+Front-end/scripts/main.js
 
 Features:
 - Accepts English text input from the user
 - Loads trained English models
 - Predicts whether text is human-written or AI-generated
-- Uses the English essay model for the main AI percentage and the English sentence model for local highlighting
+- Lets the user choose between saved English essay models from `models/essay/ml`
+- Lets the user choose between saved English sentence/local models from `models/sentence/ml`
+- Also supports saved PyTorch DL models from `models/essay/dl` and `models/sentence/dl`
+- Also supports local RoBERTa/ELECTRA checkpoints from the transformer model folders when the required cached tokenizer/config files are available
+- Uses the selected essay model for the main AI percentage and the selected sentence model only for local highlighting
 
 ---
 
@@ -142,13 +150,18 @@ To launch the web-based demo locally, follow the steps below.
 
    http://127.0.0.1:5000
 
-The trained model files should be placed in the ignored `models/` directory:
-- `models/sentences_passive_aggressive_pipeline.pkl`
-- `models/essay_passive_aggressive_pipeline.pkl`
+The trained machine-learning pipeline files should be placed in the ignored `models/` directory:
+- `models/essay/ml/*.pkl`
+- `models/sentence/ml/*.pkl`
+- `models/essay/dl/*.pt` with `models/essay/dl/essay_tokenizer.pkl`
+- `models/sentence/dl/*.pt` with `models/sentence/dl/sentence_tokenizer.pkl`
+- `models/essay/transformers/{roberta,electra}/*.pt`
+- `models/sentence/transformers/{roberta,electra}/*.pt`
 
 Processed dataset pickles such as `sentence.pkl` belong in the ignored `data/` directory, not `models/`.
 
-The essay detector analyzes the full text as one document and provides the official AI percentage. The sentence detector only ranks local sections for highlighting, and the amount of highlighted text is limited by the essay model's overall score.
+The selected essay detector analyzes the full text as one document and provides the official AI percentage. The selected sentence detector only ranks local sections for highlighting, and the amount of highlighted text is limited by the essay model's overall score.
+Transformer inference uses the local checkpoints and local Hugging Face cache; it does not download models at request time.
 
 ---
 

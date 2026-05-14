@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import math
 import pickle
@@ -10,10 +11,22 @@ from typing import Any
 
 import joblib
 import nltk
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
+
+try:
+    import torch
+    import torch.nn as nn
+except Exception:
+    torch = None
+    nn = None
+
+try:
+    from transformers import ElectraConfig, ElectraModel, ElectraTokenizer, RobertaConfig, RobertaModel, RobertaTokenizer
+except Exception:
+    ElectraConfig = ElectraModel = ElectraTokenizer = RobertaConfig = RobertaModel = RobertaTokenizer = None
 
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +35,8 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 MODELS_DIR = PROJECT_ROOT / "models"
+CACHE_DIR = PROJECT_ROOT / "cache"
+TRANSFORMERS_CACHE_DIR = CACHE_DIR / "transformers"
 MIN_CHUNK_SENTENCES = 2
 TARGET_CHUNK_SENTENCES = 4
 MAX_CHUNK_SENTENCES = 6
@@ -30,29 +45,155 @@ MIN_LOCAL_SECTION_CHARS = 150
 LONG_LOCAL_SENTENCE_CHARS = 220
 MAX_LOCAL_SECTION_CHARS = 650
 TARGET_LOCAL_SECTION_SENTENCES = 3
+TRANSFORMER_MAX_LEN = 256
+
+
+if nn is not None:
+    class DNNModel(nn.Module):
+        def __init__(self, vocab_size: int, embed_dim: int, num_classes: int):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, embed_dim)
+            self.fc1 = nn.Linear(embed_dim, 128)
+            self.dropout = nn.Dropout(0.5)
+            self.fc2 = nn.Linear(128, 64)
+            self.output = nn.Linear(64, num_classes)
+
+        def forward(self, x):
+            x = self.embedding(x)
+            x = torch.mean(x, dim=1)
+            x = torch.relu(self.fc1(x))
+            x = self.dropout(x)
+            x = torch.relu(self.fc2(x))
+            return self.output(x)
+
+
+    class BiLSTMModel(nn.Module):
+        def __init__(self, vocab_size: int, embed_dim: int, hidden_dim: int, output_dim: int):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, embed_dim)
+            self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+            self.output = nn.Linear(2 * hidden_dim, output_dim)
+
+        def forward(self, x):
+            x = self.embedding(x)
+            _, (h_n, _) = self.lstm(x)
+            x = torch.cat((h_n[-2, :, :], h_n[-1, :, :]), dim=1)
+            return self.output(x)
+
+
+    class CNNModel(nn.Module):
+        def __init__(self, vocab_size: int, embed_dim: int, num_classes: int):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, embed_dim)
+            self.conv1d = nn.Conv1d(in_channels=embed_dim, out_channels=128, kernel_size=5)
+            self.global_max_pool = nn.AdaptiveMaxPool1d(1)
+            self.fc1 = nn.Linear(128, 64)
+            self.dropout = nn.Dropout(0.5)
+            self.fc2 = nn.Linear(64, num_classes)
+
+        def forward(self, x):
+            x = self.embedding(x)
+            x = x.permute(0, 2, 1)
+            x = torch.relu(self.conv1d(x))
+            x = self.global_max_pool(x).squeeze(-1)
+            x = torch.relu(self.fc1(x))
+            x = self.dropout(x)
+            return self.fc2(x)
+
+
+    class GRUModel(nn.Module):
+        def __init__(self, vocab_size: int, embed_dim: int, gru_hidden_dim: int, num_classes: int):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, embed_dim)
+            self.gru = nn.GRU(embed_dim, gru_hidden_dim, batch_first=True)
+            self.fc1 = nn.Linear(gru_hidden_dim, 128)
+            self.dropout = nn.Dropout(0.5)
+            self.fc2 = nn.Linear(128, 64)
+            self.output = nn.Linear(64, num_classes)
+
+        def forward(self, x):
+            x = self.embedding(x)
+            _, hn = self.gru(x)
+            x = hn[-1]
+            x = torch.relu(self.fc1(x))
+            x = self.dropout(x)
+            x = torch.relu(self.fc2(x))
+            return self.output(x)
+
+
+class TorchPipeline:
+    classes_ = [0, 1]
+
+    def __init__(self, model: Any, tokenizer: Any, max_len: int, device: Any):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+        self.device = device
+
+    def _texts_to_tensor(self, texts: list[str]):
+        rows = []
+        word_index = getattr(self.tokenizer, "word_index", {})
+        oov_token = getattr(self.tokenizer, "oov_token", None)
+        oov_index = word_index.get(oov_token, 1) if oov_token else 1
+        num_words = getattr(self.tokenizer, "num_words", None)
+
+        for text in texts:
+            tokens = str(text).split()
+            sequence = []
+            for token in tokens:
+                index = word_index.get(token, oov_index)
+                if num_words and index >= num_words:
+                    index = oov_index
+                sequence.append(index)
+            sequence = sequence[: self.max_len]
+            sequence.extend([0] * (self.max_len - len(sequence)))
+            rows.append(sequence)
+
+        return torch.tensor(rows, dtype=torch.long, device=self.device)
+
+    def predict_proba(self, texts: list[str]):
+        with torch.no_grad():
+            inputs = self._texts_to_tensor(texts)
+            logits = self.model(inputs)
+            return torch.softmax(logits, dim=1).cpu().numpy()
+
+    def predict(self, texts: list[str]):
+        probabilities = self.predict_proba(texts)
+        return probabilities.argmax(axis=1)
+
+
+class TransformerPipeline:
+    classes_ = [0, 1]
+
+    def __init__(self, encoder: Any, classifier: Any, tokenizer: Any, device: Any):
+        self.encoder = encoder
+        self.classifier = classifier
+        self.tokenizer = tokenizer
+        self.device = device
+
+    def predict_proba(self, texts: list[str]):
+        encoded = self.tokenizer(
+            [str(text) for text in texts],
+            truncation=True,
+            padding="max_length",
+            max_length=TRANSFORMER_MAX_LEN,
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(self.device)
+        attention_mask = encoded["attention_mask"].to(self.device)
+        with torch.no_grad():
+            outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            cls_token = outputs.last_hidden_state[:, 0, :]
+            logits = self.classifier(cls_token)
+            ai_prob = torch.sigmoid(logits).squeeze(-1)
+            probabilities = torch.stack((1 - ai_prob, ai_prob), dim=1)
+            return probabilities.cpu().numpy()
+
+    def predict(self, texts: list[str]):
+        probabilities = self.predict_proba(texts)
+        return probabilities.argmax(axis=1)
 
 MODEL_CONFIG = {
-    "en_combined": {
-        "name": "English combined detector",
-        "language": "en",
-        "source": "combined",
-        "essay_model_key": "en_essay",
-        "sentence_model_key": "en_sentence",
-    },
-    "en_sentence": {
-        "name": "English sentence model",
-        "path": MODELS_DIR / "sentences_passive_aggressive_pipeline.pkl",
-        "language": "en",
-        "split_mode": "chunk",
-        "source": "local",
-    },
-    "en_essay": {
-        "name": "English essay model",
-        "path": MODELS_DIR / "essay_passive_aggressive_pipeline.pkl",
-        "language": "en",
-        "split_mode": "document",
-        "source": "local",
-    },
 }
 
 LABELS = {
@@ -63,6 +204,179 @@ LABELS = {
 app = Flask(__name__, template_folder=str(BASE_DIR))
 _model_cache: dict[str, Any] = {}
 _model_errors: dict[str, str] = {}
+
+
+def title_from_slug(slug: str) -> str:
+    overrides = {
+        "bilstm": "BiLSTM",
+        "cnn": "CNN",
+        "dnn": "DNN",
+        "electra": "ELECTRA",
+        "gru": "GRU",
+        "roberta": "RoBERTa",
+        "xgboost": "XGBoost",
+        "naive_bayes": "Naive Bayes",
+        "logistic_regression": "Logistic Regression",
+        "passive_aggressive": "Passive Aggressive",
+        "random_forest": "Random Forest",
+    }
+    return overrides.get(slug, slug.replace("_", " ").title())
+
+
+def slug_from_model_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def load_metric_scores(category: str) -> dict[str, float]:
+    metrics_path = MODELS_DIR / category / f"{category}_ml_metrics.json"
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Could not read model metrics from %s", metrics_path)
+        return {}
+
+    scores = {}
+    for item in metrics:
+        model_name = item.get("model")
+        if not model_name:
+            continue
+        scores[slug_from_model_name(model_name)] = float(item.get("f1") or item.get("accuracy") or 0)
+    return scores
+
+
+def load_dl_metric_scores(category: str) -> dict[str, float]:
+    metrics_path = MODELS_DIR / category / f"{category}_dl_metrics.json"
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Could not read DL model metrics from %s", metrics_path)
+        return {}
+
+    scores = {}
+    for slug, item in metrics.items():
+        accuracy = item.get("accuracy") or []
+        scores[slug_from_model_name(slug)] = float(max(accuracy) if accuracy else 0)
+    return scores
+
+
+def likely_supports_predict_proba(slug: str) -> bool:
+    return slug != "passive_aggressive"
+
+
+def discover_model_registry() -> dict[str, dict[str, Any]]:
+    registry: dict[str, dict[str, Any]] = {}
+    for category in ("essay", "sentence"):
+        model_dir = MODELS_DIR / category / "ml"
+        metric_scores = load_metric_scores(category)
+        if not model_dir.exists():
+            logger.warning("Model directory is missing: %s", model_dir)
+            continue
+
+        for model_path in sorted(model_dir.glob(f"{category}_*.pkl")):
+            slug = model_path.stem.removeprefix(f"{category}_")
+            model_id = f"{category}_{slug}"
+            model_name = title_from_slug(slug)
+            registry[model_id] = {
+                "id": model_id,
+                "name": f"{category.title()} {model_name}",
+                "path": model_path,
+                "language": "en",
+                "category": category,
+                "source": "local",
+                "model_family": "sklearn_pipeline",
+                "supports_predict_proba": likely_supports_predict_proba(slug),
+                "probability_fallback": "decision_function sigmoid, then hard prediction",
+                "metric_score": metric_scores.get(slug),
+                "split_mode": "document" if category == "essay" else "chunk",
+            }
+
+        dl_dir = MODELS_DIR / category / "dl"
+        dl_config_path = dl_dir / f"{category}_dl_config.json"
+        dl_metric_scores = load_dl_metric_scores(category)
+        try:
+            dl_config = json.loads(dl_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("Could not read DL model config from %s", dl_config_path)
+            dl_config = {}
+
+        for slug, model_info in (dl_config.get("models") or {}).items():
+            model_path = dl_dir / model_info.get("file", "")
+            tokenizer_path = dl_dir / f"{category}_tokenizer.pkl"
+            if not model_path.exists() or not tokenizer_path.exists():
+                continue
+            model_id = f"{category}_dl_{slug}"
+            registry[model_id] = {
+                "id": model_id,
+                "name": f"{category.title()} {title_from_slug(slug)}",
+                "path": model_path,
+                "tokenizer_path": tokenizer_path,
+                "language": "en",
+                "category": category,
+                "source": "local",
+                "model_family": "torch_dl",
+                "dl_architecture": slug,
+                "dl_config": dl_config,
+                "dl_model_config": model_info,
+                "supports_predict_proba": True,
+                "probability_fallback": "softmax probability",
+                "metric_score": dl_metric_scores.get(slug),
+                "split_mode": "document" if category == "essay" else "chunk",
+            }
+
+        transformer_dir = MODELS_DIR / category / "transformers"
+        for slug in ("roberta", "electra"):
+            model_family_dir = transformer_dir / slug
+            checkpoints = sorted(model_family_dir.glob("best_*.pt"))
+            if not checkpoints:
+                continue
+            checkpoint = checkpoints[-1]
+            model_id = f"{category}_transformer_{slug}"
+            registry[model_id] = {
+                "id": model_id,
+                "name": f"{category.title()} {title_from_slug(slug)}",
+                "path": checkpoint,
+                "language": "en",
+                "category": category,
+                "source": "local",
+                "model_family": "transformer",
+                "transformer_architecture": slug,
+                "supports_predict_proba": True,
+                "probability_fallback": "sigmoid probability",
+                "metric_score": None,
+                "split_mode": "document" if category == "essay" else "chunk",
+            }
+    return registry
+
+
+def models_for_category(category: str) -> list[dict[str, Any]]:
+    models = [config for config in MODEL_CONFIG.values() if config.get("category") == category]
+    return sorted(
+        models,
+        key=lambda config: (
+            config.get("metric_score") is None,
+            -(config.get("metric_score") or 0),
+            config["name"],
+        ),
+    )
+
+
+def default_model_id(category: str) -> str | None:
+    models = models_for_category(category)
+    if not models:
+        return None
+    return models[0]["id"]
+
+
+def public_model(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": config["id"],
+        "name": config["name"],
+        "supports_predict_proba": config["supports_predict_proba"],
+        "probability_fallback": config["probability_fallback"],
+    }
+
+
+MODEL_CONFIG.update(discover_model_registry())
 
 
 def ensure_nltk_resource(resource_path: str, package_name: str) -> None:
@@ -101,18 +415,23 @@ def home():
     return render_template("index.html")
 
 
+@app.route("/styles/<path:filename>")
+def styles_asset(filename: str):
+    return send_from_directory(BASE_DIR / "styles", filename)
+
+
+@app.route("/scripts/<path:filename>")
+def scripts_asset(filename: str):
+    return send_from_directory(BASE_DIR / "scripts", filename)
+
+
 @app.route("/model-status/<model_key>")
 def model_status(model_key: str):
     if model_key not in MODEL_CONFIG:
         return jsonify({"ok": False, "error": "Unknown model."}), 404
 
     try:
-        source = MODEL_CONFIG[model_key].get("source")
-        if source == "combined":
-            get_model(MODEL_CONFIG[model_key]["essay_model_key"])
-            get_model(MODEL_CONFIG[model_key]["sentence_model_key"])
-        else:
-            get_model(model_key)
+        get_model(model_key)
     except RuntimeError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 503
     except Exception:
@@ -120,6 +439,22 @@ def model_status(model_key: str):
         return jsonify({"ok": False, "error": "Model status check failed. Check the backend logs."}), 500
 
     return jsonify({"ok": True, "model": MODEL_CONFIG[model_key]["name"]})
+
+
+@app.route("/models")
+def available_models():
+    essay_models = [public_model(model) for model in models_for_category("essay")]
+    sentence_models = [public_model(model) for model in models_for_category("sentence")]
+    return jsonify(
+        {
+            "essay_models": essay_models,
+            "sentence_models": sentence_models,
+            "defaults": {
+                "essay_model_id": default_model_id("essay"),
+                "sentence_model_id": default_model_id("sentence"),
+            },
+        }
+    )
 
 
 def clean_english_text(text: str) -> str:
@@ -292,6 +627,88 @@ def chunk_text(text: str) -> list[str]:
         return [text.strip()] if text.strip() else []
 
 
+def torch_device():
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed, so this model type cannot run.")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def load_torch_state_dict(model_path: Path) -> Any:
+    try:
+        return torch.load(model_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(model_path, map_location="cpu")
+
+
+def build_dl_model(config: dict[str, Any]) -> Any:
+    if torch is None or nn is None:
+        raise RuntimeError("PyTorch is not installed, so deep learning models cannot run.")
+
+    model_info = config["dl_model_config"]
+    dl_config = config["dl_config"]
+    architecture = config["dl_architecture"]
+    vocab_size = int(dl_config.get("vocab_size", 0))
+    embed_dim = int(model_info.get("embed_dim", 128))
+    num_classes = int(model_info.get("num_classes", 2))
+
+    if architecture == "cnn":
+        return CNNModel(vocab_size, embed_dim, num_classes)
+    if architecture == "bilstm":
+        return BiLSTMModel(vocab_size, embed_dim, int(model_info.get("hidden_dim", 64)), num_classes)
+    if architecture == "gru":
+        return GRUModel(vocab_size, embed_dim, int(model_info.get("gru_hidden_dim", 128)), num_classes)
+    if architecture == "dnn":
+        return DNNModel(vocab_size, embed_dim, num_classes)
+    raise RuntimeError(f"Unsupported DL architecture: {architecture}")
+
+
+def load_torch_dl_pipeline(config: dict[str, Any]) -> TorchPipeline:
+    device = torch_device()
+    model = build_dl_model(config)
+    state_dict = load_torch_state_dict(config["path"])
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    tokenizer = joblib.load(config["tokenizer_path"])
+    max_len = int(config["dl_config"].get("max_len", 500))
+    return TorchPipeline(model, tokenizer, max_len, device)
+
+
+def load_transformer_pipeline(config: dict[str, Any]) -> TransformerPipeline:
+    if torch is None or nn is None:
+        raise RuntimeError("PyTorch is not installed, so transformer models cannot run.")
+
+    architecture = config["transformer_architecture"]
+    device = torch_device()
+    cache_dir = str(TRANSFORMERS_CACHE_DIR)
+    if architecture == "roberta":
+        if RobertaConfig is None or RobertaModel is None or RobertaTokenizer is None:
+            raise RuntimeError("Transformers RoBERTa support is not installed.")
+        base_name = "roberta-base"
+        hf_config = RobertaConfig.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
+        tokenizer = RobertaTokenizer.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
+        encoder = RobertaModel(hf_config)
+    elif architecture == "electra":
+        if ElectraConfig is None or ElectraModel is None or ElectraTokenizer is None:
+            raise RuntimeError("Transformers ELECTRA support is not installed.")
+        base_name = "google/electra-base-discriminator"
+        hf_config = ElectraConfig.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
+        tokenizer = ElectraTokenizer.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
+        encoder = ElectraModel(hf_config)
+    else:
+        raise RuntimeError(f"Unsupported transformer architecture: {architecture}")
+
+    checkpoint = load_torch_state_dict(config["path"])
+    encoder.load_state_dict(checkpoint["model"])
+    classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(hf_config.hidden_size, 1))
+    classifier.load_state_dict(checkpoint["clf"])
+    encoder.to(device)
+    classifier.to(device)
+    encoder.eval()
+    classifier.eval()
+    return TransformerPipeline(encoder, classifier, tokenizer, device)
+
+
 def get_model(model_key: str) -> Any:
     if model_key in _model_cache:
         return _model_cache[model_key]
@@ -307,17 +724,23 @@ def get_model(model_key: str) -> Any:
 
     logger.info("Loading %s from %s", config["name"], model_path)
     try:
-        model = joblib.load(model_path)
+        model_family = config.get("model_family")
+        if model_family == "torch_dl":
+            model = load_torch_dl_pipeline(config)
+        elif model_family == "transformer":
+            model = load_transformer_pipeline(config)
+        else:
+            try:
+                model = joblib.load(model_path)
+            except Exception:
+                logger.info("joblib could not load %s; trying pickle fallback", model_path)
+                with model_path.open("rb") as file:
+                    model = pickle.load(file)
     except Exception as exc:
-        logger.info("joblib could not load %s; trying pickle fallback", model_path)
-        try:
-            with model_path.open("rb") as file:
-                model = pickle.load(file)
-        except Exception as pickle_exc:
-            logger.exception("Failed loading model from %s", model_path)
-            message = f"Could not load {config['name']} from {model_path.name}."
-            _model_errors[model_key] = message
-            raise RuntimeError(message) from pickle_exc
+        logger.exception("Failed loading model from %s", model_path)
+        message = f"Could not load {config['name']} from {model_path.name}."
+        _model_errors[model_key] = message
+        raise RuntimeError(message) from exc
 
     if not hasattr(model, "predict"):
         model_type = f"{type(model).__module__}.{type(model).__name__}"
@@ -407,57 +830,12 @@ def local_section_chunks(text: str) -> list[str]:
     if not text:
         return []
 
-    paragraphs = split_paragraphs(text) or [text]
     sections = []
-
-    for paragraph in paragraphs:
+    for paragraph in split_paragraphs(text) or [text]:
         sentences = split_segments(paragraph)
-        if not sentences:
-            sections.append(paragraph)
-            continue
-        if len(sentences) == 1:
-            sections.append(sentences[0])
-            continue
+        sections.extend(sentences or [paragraph])
 
-        current_sentences = []
-        current_length = 0
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-
-            sentence_length = len(sentence)
-            if not current_sentences and sentence_length >= LONG_LOCAL_SENTENCE_CHARS:
-                sections.append(sentence)
-                continue
-
-            next_length = current_length + sentence_length + (1 if current_sentences else 0)
-            should_flush = (
-                current_sentences
-                and (
-                    next_length > MAX_LOCAL_SECTION_CHARS
-                    or (
-                        len(current_sentences) >= TARGET_LOCAL_SECTION_SENTENCES
-                        and current_length >= MIN_LOCAL_SECTION_CHARS
-                    )
-                )
-            )
-            if should_flush:
-                sections.append(join_chunk_sentences(current_sentences))
-                current_sentences = []
-                current_length = 0
-
-            current_sentences.append(sentence)
-            current_length += sentence_length + (1 if current_length else 0)
-
-        if current_sentences:
-            tail = join_chunk_sentences(current_sentences)
-            if sections and len(tail) < MIN_LOCAL_SECTION_CHARS and len(sections[-1]) + len(tail) + 1 <= MAX_LOCAL_SECTION_CHARS:
-                sections[-1] = f"{sections[-1]} {tail}".strip()
-            else:
-                sections.append(tail)
-
-    return normalize_local_sections(sections)
+    return [section.strip() for section in sections if section.strip()]
 
 
 def normalize_local_sections(sections: list[str]) -> list[str]:
@@ -503,9 +881,14 @@ def model_predictions_and_scores(model: Any, inputs: list[str]) -> tuple[list[in
     return predictions, ai_scores, confidence_is_probability
 
 
-def choose_highlighted_sections(sections: list[dict[str, Any]], essay_ai_percentage: float) -> set[int]:
+def choose_highlighted_sections(
+    sections: list[dict[str, Any]],
+    essay_ai_percentage: float,
+) -> set[int]:
     if not sections:
         return set()
+    if essay_ai_percentage >= 99.995:
+        return set(range(len(sections)))
     if len(sections) == 1:
         return {0} if essay_ai_percentage >= 65 else set()
     if essay_ai_percentage < 5:
@@ -544,8 +927,46 @@ def choose_highlighted_sections(sections: list[dict[str, Any]], essay_ai_percent
     return selected
 
 
-def predict_english_combined(text: str) -> dict[str, Any]:
-    essay_model = get_model("en_essay")
+def render_highlighted_sections(original_text: str, sections: list[dict[str, Any]], selected_indexes: set[int]) -> str:
+    if not sections:
+        return html.escape(original_text)
+
+    parts = []
+    cursor = 0
+    for index, section in enumerate(sections):
+        section_text = section["text"]
+        start = original_text.find(section_text, cursor)
+        if start < 0:
+            logger.warning("Could not locate highlighted section in original text; using section-order fallback")
+            fallback_parts = []
+            for fallback_index, fallback_section in enumerate(sections):
+                escaped = html.escape(fallback_section["text"])
+                if fallback_index in selected_indexes:
+                    fallback_parts.append(f'<mark class="ai-highlight">{escaped}</mark>')
+                else:
+                    fallback_parts.append(f"<span>{escaped}</span>")
+            return " ".join(fallback_parts)
+
+        parts.append(html.escape(original_text[cursor:start]))
+        escaped_section = html.escape(section_text)
+        if index in selected_indexes:
+            parts.append(f'<mark class="ai-highlight">{escaped_section}</mark>')
+        else:
+            parts.append(f"<span>{escaped_section}</span>")
+        cursor = start + len(section_text)
+
+    parts.append(html.escape(original_text[cursor:]))
+    return "".join(parts)
+
+
+def predict_english_combined(
+    text: str,
+    essay_model_id: str,
+    sentence_model_id: str,
+) -> dict[str, Any]:
+    essay_config = MODEL_CONFIG[essay_model_id]
+    sentence_config = MODEL_CONFIG[sentence_model_id]
+    essay_model = get_model(essay_model_id)
 
     processed_document = preprocess_english(text)
     safe_document = processed_document if processed_document else " "
@@ -563,7 +984,7 @@ def predict_english_combined(text: str) -> dict[str, Any]:
     highlighted_text = html.escape(text)
 
     try:
-        sentence_model = get_model("en_sentence")
+        sentence_model = get_model(sentence_model_id)
         sections = local_section_chunks(text)
         if sections:
             processed_sections = [preprocess_english(section) for section in sections]
@@ -579,17 +1000,13 @@ def predict_english_combined(text: str) -> dict[str, Any]:
                 }
                 for section, prediction, score in zip(sections, local_predictions, local_scores)
             ]
-            selected_indexes = choose_highlighted_sections(ranked_sections, essay_ai_percentage)
-            highlighted_parts = []
+            selected_indexes = choose_highlighted_sections(
+                ranked_sections,
+                essay_ai_percentage,
+            )
 
             for index, section in enumerate(ranked_sections):
                 selected = index in selected_indexes
-                escaped_section = html.escape(section["text"])
-                if selected:
-                    highlighted_parts.append(f'<mark class="ai-highlight">{escaped_section}</mark>')
-                else:
-                    highlighted_parts.append(f"<span>{escaped_section}</span>")
-
                 section_results.append(
                     {
                         "index": index + 1,
@@ -601,15 +1018,14 @@ def predict_english_combined(text: str) -> dict[str, Any]:
                     }
                 )
 
-            highlighted_text = "\n\n".join(highlighted_parts)
+            highlighted_text = render_highlighted_sections(text, ranked_sections, selected_indexes)
     except Exception:
         logger.exception("Local sentence-model highlighting failed")
         local_error = "Local highlighting is unavailable, but the essay-model overall score is still shown."
 
     note = (
-        "Overall AI percentage is based on the essay/full-text model. "
-        "Highlighted sections are the most suspicious local sections according to the sentence model, "
-        "limited by the essay model's overall score."
+        "The essay model provides the overall score. "
+        "The sentence model only ranks local sections for highlighting."
     )
     if local_error:
         note = f"{note} {local_error}"
@@ -619,13 +1035,17 @@ def predict_english_combined(text: str) -> dict[str, Any]:
         "human_percentage": round(100 - essay_ai_percentage, 2),
         "overall_label": overall_label(essay_ai_percentage),
         "language": "en",
-        "model_key": "en_combined",
-        "model_file": MODEL_CONFIG["en_essay"]["path"].name,
+        "essay_model_id": essay_model_id,
+        "sentence_model_id": sentence_model_id,
+        "essay_model_name": essay_config["name"],
+        "sentence_model_name": sentence_config["name"],
+        "model_file": essay_config["path"].name,
+        "sentence_model_file": sentence_config["path"].name,
         "used_probability_average": essay_uses_probability,
         "segments": section_results,
         "highlighted_text": highlighted_text,
         "analysis_note": note,
-        "breakdown_label": "Local Section Breakdown",
+        "breakdown_label": f"Section Breakdown ({sentence_config['name']})",
     }
 
 
@@ -711,22 +1131,31 @@ def predict_segments(model_key: str, text: str) -> dict[str, Any]:
 def predict():
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
-    model_key = data.get("model_key") or "en_combined"
-    if model_key == "en":
-        model_key = "en_combined"
+    essay_model_id = data.get("essay_model_id") or default_model_id("essay")
+    sentence_model_id = data.get("sentence_model_id") or default_model_id("sentence")
 
-    logger.info("Received prediction request: model=%s, characters=%s", model_key, len(text))
+    logger.info(
+        "Received prediction request: essay_model=%s, sentence_model=%s, characters=%s",
+        essay_model_id,
+        sentence_model_id,
+        len(text),
+    )
 
-    if model_key not in MODEL_CONFIG:
-        return jsonify({"error": "Please choose a valid detector."}), 400
+    if not essay_model_id or essay_model_id not in MODEL_CONFIG or MODEL_CONFIG[essay_model_id].get("category") != "essay":
+        return jsonify({"error": "Please choose a valid essay model."}), 400
+    if not sentence_model_id or sentence_model_id not in MODEL_CONFIG or MODEL_CONFIG[sentence_model_id].get("category") != "sentence":
+        return jsonify({"error": "Please choose a valid sentence model."}), 400
     if not text:
         return jsonify({"error": "Please paste some text to analyze."}), 400
 
     try:
-        source = MODEL_CONFIG[model_key].get("source")
-        if source == "combined":
-            return jsonify(predict_english_combined(text))
-        return jsonify(predict_segments(model_key, text))
+        return jsonify(
+            predict_english_combined(
+                text,
+                essay_model_id,
+                sentence_model_id,
+            )
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except RuntimeError as exc:
