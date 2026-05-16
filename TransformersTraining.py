@@ -4,7 +4,10 @@ import random
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-from sklearn.metrics import confusion_matrix, roc_curve
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix, f1_score,
+    precision_score, recall_score, roc_curve
+)
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -78,6 +81,7 @@ def train_Transformers(
     epochs: int,
     loss_check: int,
     checkpoint_dir: str = None,
+    class_weights=None,
 ):
     mtype = model.config.model_type if hasattr(model.config, "model_type") else "roberta"
     ckpt_dir = checkpoint_dir or f"checkpoints_{mtype}"
@@ -102,7 +106,16 @@ def train_Transformers(
         lr=lr,
         weight_decay=weight_decay,
     )
-    criterion = nn.BCEWithLogitsLoss()
+    # For the binary single-logit classifier, balanced class weights map to BCE pos_weight.
+    if class_weights is not None:
+        class_weights = torch.as_tensor(class_weights, dtype=torch.float, device=device).flatten()
+        if class_weights.numel() != 2:
+            raise ValueError("Transformer weighted binary loss expects exactly two class weights.")
+        pos_weight = (class_weights[1] / class_weights[0]).reshape(1)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        print({"transformer_pos_weight": round(float(pos_weight.item()), 4)})
+    else:
+        criterion = nn.BCEWithLogitsLoss()
 
     global_iter = 0
     best_val_loss = float("inf")
@@ -307,9 +320,16 @@ def train_Transformers(
             all_labels.extend(lbl.view(-1).cpu().tolist())
 
     preds = [1 if p >= 0.5 else 0 for p in all_probs]
-    cm = confusion_matrix(all_labels, preds)
+    all_labels_int = [int(label) for label in all_labels]
+    cm = confusion_matrix(all_labels_int, preds, labels=[0, 1])
+    print(f"Validation Accuracy:  {accuracy_score(all_labels_int, preds):.4f}")
+    print(f"Validation Precision: {precision_score(all_labels_int, preds, zero_division=0):.4f}")
+    print(f"Validation Recall:    {recall_score(all_labels_int, preds, zero_division=0):.4f}")
+    print(f"Validation F1 Score:  {f1_score(all_labels_int, preds, zero_division=0):.4f}")
+    print("Classification report:")
+    print(classification_report(all_labels_int, preds, labels=[0, 1], target_names=["human", "ai"], zero_division=0))
     plot_confusion_matrix(cm)
-    fpr, tpr, _ = roc_curve(all_labels, all_probs)
+    fpr, tpr, _ = roc_curve(all_labels_int, all_probs)
     plt.figure()
     plt.plot(fpr, tpr)
     plt.xlabel("False Positive Rate")
