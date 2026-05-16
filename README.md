@@ -47,12 +47,11 @@ Faculty of Computer Science, Misr International University, Cairo, Egypt
 
 Text Cleaning
 -> Tokenization
--> Stopword Removal
 -> Lemmatization
--> Train-Test Split (70 / 30)
+-> Train / Validation / Test Split (70 / 15 / 15)
 -> Vectorization (TF-IDF or Tokenizer)
 
-English preprocessing uses NLTK stopwords and lemmatization.
+English preprocessing keeps stopwords and uses tokenization plus lemmatization.
 
 ---
 
@@ -75,7 +74,6 @@ Deep Learning Models:
 
 Transformer Models:
 - RoBERTa
-- ELECTRA
 
 ---
 
@@ -125,7 +123,7 @@ Features:
 - Lets the user choose between saved English essay models from `models/essay/ml`
 - Lets the user choose between saved English sentence/local models from `models/sentence/ml`
 - Also supports saved PyTorch DL models from `models/essay/dl` and `models/sentence/dl`
-- Also supports local RoBERTa/ELECTRA checkpoints from the transformer model folders when the required cached tokenizer/config files are available
+- Also supports local RoBERTa checkpoints from the transformer model folders when the required cached tokenizer/config files are available
 - Uses the selected essay model for the main AI percentage and the selected sentence model only for local highlighting
 
 ---
@@ -155,8 +153,8 @@ The trained machine-learning pipeline files should be placed in the ignored `mod
 - `models/sentence/ml/*.pkl`
 - `models/essay/dl/*.pt` with `models/essay/dl/essay_tokenizer.pkl`
 - `models/sentence/dl/*.pt` with `models/sentence/dl/sentence_tokenizer.pkl`
-- `models/essay/transformers/{roberta,electra}/*.pt`
-- `models/sentence/transformers/{roberta,electra}/*.pt`
+- `models/essay/transformers/roberta/*.pt`
+- `models/sentence/transformers/roberta/*.pt`
 
 Processed dataset pickles such as `sentence.pkl` belong in the ignored `data/` directory, not `models/`.
 

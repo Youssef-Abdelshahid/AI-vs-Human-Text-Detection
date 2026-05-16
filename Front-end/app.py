@@ -12,7 +12,6 @@ from typing import Any
 import joblib
 import nltk
 from flask import Flask, jsonify, render_template, request, send_from_directory
-from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 
@@ -24,9 +23,9 @@ except Exception:
     nn = None
 
 try:
-    from transformers import ElectraConfig, ElectraModel, ElectraTokenizer, RobertaConfig, RobertaModel, RobertaTokenizer
+    from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 except Exception:
-    ElectraConfig = ElectraModel = ElectraTokenizer = RobertaConfig = RobertaModel = RobertaTokenizer = None
+    RobertaConfig = RobertaModel = RobertaTokenizer = None
 
 
 logging.basicConfig(level=logging.INFO)
@@ -211,7 +210,6 @@ def title_from_slug(slug: str) -> str:
         "bilstm": "BiLSTM",
         "cnn": "CNN",
         "dnn": "DNN",
-        "electra": "ELECTRA",
         "gru": "GRU",
         "roberta": "RoBERTa",
         "xgboost": "XGBoost",
@@ -240,7 +238,15 @@ def load_metric_scores(category: str) -> dict[str, float]:
         model_name = item.get("model")
         if not model_name:
             continue
-        scores[slug_from_model_name(model_name)] = float(item.get("f1") or item.get("accuracy") or 0)
+        scores[slug_from_model_name(model_name)] = float(
+            item.get("val_f1")
+            or item.get("test_f1")
+            or item.get("f1")
+            or item.get("val_accuracy")
+            or item.get("test_accuracy")
+            or item.get("accuracy")
+            or 0
+        )
     return scores
 
 
@@ -254,8 +260,14 @@ def load_dl_metric_scores(category: str) -> dict[str, float]:
 
     scores = {}
     for slug, item in metrics.items():
-        accuracy = item.get("accuracy") or []
-        scores[slug_from_model_name(slug)] = float(max(accuracy) if accuracy else 0)
+        validation_metrics = item.get("validation") or {}
+        test_metrics = item.get("test") or {}
+        val_accuracy = item.get("val_accuracy") or item.get("accuracy") or []
+        scores[slug_from_model_name(slug)] = float(
+            validation_metrics.get("f1")
+            or test_metrics.get("f1")
+            or (max(val_accuracy) if val_accuracy else 0)
+        )
     return scores
 
 
@@ -324,7 +336,7 @@ def discover_model_registry() -> dict[str, dict[str, Any]]:
             }
 
         transformer_dir = MODELS_DIR / category / "transformers"
-        for slug in ("roberta", "electra"):
+        for slug in ("roberta",):
             model_family_dir = transformer_dir / slug
             checkpoints = sorted(model_family_dir.glob("best_*.pt"))
             if not checkpoints:
@@ -392,21 +404,11 @@ def ensure_nltk_resource(resource_path: str, package_name: str) -> None:
 for resource_path, package_name in (
     ("tokenizers/punkt", "punkt"),
     ("tokenizers/punkt_tab", "punkt_tab"),
-    ("corpora/stopwords", "stopwords"),
     ("corpora/wordnet", "wordnet"),
 ):
     ensure_nltk_resource(resource_path, package_name)
 
 
-def load_stopwords(language: str) -> set[str]:
-    try:
-        return set(stopwords.words(language))
-    except LookupError:
-        logger.exception("Missing NLTK stopwords for %s", language)
-        return set()
-
-
-ENGLISH_STOPWORDS = load_stopwords("english")
 ENGLISH_LEMMATIZER = WordNetLemmatizer()
 
 
@@ -472,8 +474,7 @@ def preprocess_english(text: str) -> str:
     except LookupError:
         logger.exception("NLTK word tokenizer unavailable; using whitespace tokenization")
         tokens = cleaned.split()
-    filtered = [word for word in tokens if word.lower() not in ENGLISH_STOPWORDS]
-    lemmatized = [ENGLISH_LEMMATIZER.lemmatize(word) for word in filtered]
+    lemmatized = [ENGLISH_LEMMATIZER.lemmatize(word) for word in tokens]
     return " ".join(lemmatized)
 
 
@@ -688,13 +689,6 @@ def load_transformer_pipeline(config: dict[str, Any]) -> TransformerPipeline:
         hf_config = RobertaConfig.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
         tokenizer = RobertaTokenizer.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
         encoder = RobertaModel(hf_config)
-    elif architecture == "electra":
-        if ElectraConfig is None or ElectraModel is None or ElectraTokenizer is None:
-            raise RuntimeError("Transformers ELECTRA support is not installed.")
-        base_name = "google/electra-base-discriminator"
-        hf_config = ElectraConfig.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
-        tokenizer = ElectraTokenizer.from_pretrained(base_name, cache_dir=cache_dir, local_files_only=True)
-        encoder = ElectraModel(hf_config)
     else:
         raise RuntimeError(f"Unsupported transformer architecture: {architecture}")
 
